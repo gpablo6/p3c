@@ -14,6 +14,7 @@ import (
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/go-git/go-git/v5/plumbing/storer"
 )
 
 // Config holds the parameters for a Clean operation.
@@ -28,6 +29,10 @@ type Config struct {
 
 	// Verbose enables additional progress output to stdout.
 	Verbose bool
+
+	// MaxCommits limits how many commits are traversed from HEAD backwards.
+	// Zero means no limit.
+	MaxCommits int
 }
 
 // Result summarises the outcome of a Clean call.
@@ -43,55 +48,31 @@ type Result struct {
 // was specifically built to remove.
 const DefaultPattern = "Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>"
 
-// StripLine removes every line in msg that exactly equals pattern (after
-// trimming trailing whitespace from each line).  Consecutive blank lines
-// produced by the removal are collapsed into a single blank line, and any
-// trailing blank lines are stripped from the result.  The original line
-// endings are preserved for lines that are kept.
+// StripLine removes every line in msg that exactly equals pattern.
+// Design choice: keep all non-matching content byte-for-byte so commit message
+// formatting is preserved exactly apart from the removed trailer line(s).
 func StripLine(msg, pattern string) string {
 	if msg == "" {
 		return ""
 	}
 
-	lines := strings.Split(msg, "\n")
-	out := make([]string, 0, len(lines))
-	for _, line := range lines {
-		if strings.TrimRight(line, " \t") == pattern {
+	parts := strings.SplitAfter(msg, "\n")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		line := strings.TrimSuffix(part, "\n")
+		if line == pattern {
 			continue
 		}
-		out = append(out, line)
+		out = append(out, part)
 	}
 
 	// If nothing was removed, return unchanged to allow callers to detect a
 	// no-op cheaply (string identity comparison).
-	if len(out) == len(lines) {
+	if len(out) == len(parts) {
 		return msg
 	}
 
-	// Collapse consecutive blank lines.
-	collapsed := make([]string, 0, len(out))
-	prevBlank := false
-	for _, line := range out {
-		isBlank := strings.TrimSpace(line) == ""
-		if isBlank && prevBlank {
-			continue
-		}
-		collapsed = append(collapsed, line)
-		prevBlank = isBlank
-	}
-
-	// Remove trailing blank lines (keep at most one trailing newline).
-	end := len(collapsed)
-	for end > 0 && strings.TrimSpace(collapsed[end-1]) == "" {
-		end--
-	}
-	collapsed = collapsed[:end]
-
-	if len(collapsed) == 0 {
-		return ""
-	}
-
-	return strings.Join(collapsed, "\n") + "\n"
+	return strings.Join(out, "")
 }
 
 // Clean rewrites the commit history on the current HEAD branch of repo,
@@ -123,8 +104,18 @@ func Clean(repo *git.Repository, cfg Config) (*Result, error) {
 	var commits []*object.Commit
 	if err := iter.ForEach(func(c *object.Commit) error {
 		commits = append(commits, c)
+		if cfg.MaxCommits > 0 && len(commits) >= cfg.MaxCommits {
+			// ErrStop is an expected early-exit signal from go-git iterators,
+			// used here to cap traversal without treating it as a failure.
+			return storer.ErrStop
+		}
 		return nil
 	}); err != nil {
+		if err == storer.ErrStop {
+			err = nil
+		}
+	}
+	if err != nil {
 		return nil, fmt.Errorf("iterating commits: %w", err)
 	}
 
@@ -184,9 +175,12 @@ func Clean(repo *git.Repository, cfg Config) (*Result, error) {
 		newCommit := &object.Commit{
 			Author:       c.Author,
 			Committer:    c.Committer,
+			MergeTag:     c.MergeTag,
+			PGPSignature: c.PGPSignature,
 			Message:      newMsg,
 			TreeHash:     c.TreeHash,
 			ParentHashes: newParents,
+			Encoding:     c.Encoding,
 		}
 
 		obj := repo.Storer.NewEncodedObject()
@@ -215,7 +209,9 @@ func Clean(repo *git.Repository, cfg Config) (*Result, error) {
 	}
 
 	newRef := plumbing.NewHashReference(ref.Name(), newTip)
-	if err := repo.Storer.SetReference(newRef); err != nil {
+	// Use compare-and-set semantics so we don't overwrite concurrent branch
+	// movements that happened while rewriting objects.
+	if err := repo.Storer.CheckAndSetReference(newRef, ref); err != nil {
 		return result, fmt.Errorf("updating branch reference: %w", err)
 	}
 

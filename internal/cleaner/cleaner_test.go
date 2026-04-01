@@ -108,7 +108,7 @@ func commitMessages(t *testing.T, repo *git.Repository) []string {
 
 func TestStripLine_RemovesTargetLine(t *testing.T) {
 	input := "feat: add feature\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>\n"
-	want := "feat: add feature\n"
+	want := "feat: add feature\n\n"
 	got := cleaner.StripLine(input, defaultPattern)
 	assert.Equal(t, want, got)
 }
@@ -128,14 +128,14 @@ func TestStripLine_RemovesOnlyMatchingLine(t *testing.T) {
 
 func TestStripLine_MultipleOccurrences(t *testing.T) {
 	input := "fix: bug\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>\n"
-	want := "fix: bug\n"
+	want := "fix: bug\n\n"
 	got := cleaner.StripLine(input, defaultPattern)
 	assert.Equal(t, want, got)
 }
 
-func TestStripLine_CollapsesConsecutiveBlankLines(t *testing.T) {
+func TestStripLine_PreservesSurroundingBlankLines(t *testing.T) {
 	input := "feat: thing\n\nSome details.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>\n\nMore text.\n"
-	want := "feat: thing\n\nSome details.\n\nMore text.\n"
+	want := "feat: thing\n\nSome details.\n\n\nMore text.\n"
 	got := cleaner.StripLine(input, defaultPattern)
 	assert.Equal(t, want, got)
 }
@@ -149,6 +149,12 @@ func TestStripLine_OnlyTargetLine(t *testing.T) {
 	input := "Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>\n"
 	got := cleaner.StripLine(input, defaultPattern)
 	assert.Equal(t, "", got)
+}
+
+func TestStripLine_DoesNotMatchTrailingWhitespaceVariant(t *testing.T) {
+	input := "feat: add feature\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>  \n"
+	got := cleaner.StripLine(input, defaultPattern)
+	assert.Equal(t, input, got)
 }
 
 // ---------------------------------------------------------------------------
@@ -195,7 +201,7 @@ func TestClean_SingleCommitWithPattern(t *testing.T) {
 
 	// Check the resulting messages (newest first).
 	msgs := commitMessages(t, repo)
-	assert.Equal(t, "feat: add stuff\n", msgs[0])
+	assert.Equal(t, "feat: add stuff\n\n", msgs[0])
 	assert.Equal(t, "initial commit\n", msgs[1])
 }
 
@@ -218,9 +224,9 @@ func TestClean_MultipleCommitsWithPattern(t *testing.T) {
 	assert.Equal(t, 2, result.CommitsModified)
 
 	msgs := commitMessages(t, repo)
-	assert.Equal(t, "feat: third\n", msgs[0])
+	assert.Equal(t, "feat: third\n\n", msgs[0])
 	assert.Equal(t, "feat: second\n", msgs[1])
-	assert.Equal(t, "feat: first\n", msgs[2])
+	assert.Equal(t, "feat: first\n\n", msgs[2])
 	assert.Equal(t, "initial commit\n", msgs[3])
 }
 
@@ -249,6 +255,10 @@ func TestClean_PreservesCommitMetadata(t *testing.T) {
 	assert.Equal(t, origCommit.Committer.Email, newCommit.Committer.Email)
 	// Tree must be preserved.
 	assert.Equal(t, origCommit.TreeHash, newCommit.TreeHash)
+	// Additional metadata fields must be preserved.
+	assert.Equal(t, origCommit.PGPSignature, newCommit.PGPSignature)
+	assert.Equal(t, origCommit.MergeTag, newCommit.MergeTag)
+	assert.Equal(t, origCommit.Encoding, newCommit.Encoding)
 }
 
 func TestClean_DryRun_DoesNotModifyRepo(t *testing.T) {
@@ -272,6 +282,54 @@ func TestClean_DryRun_DoesNotModifyRepo(t *testing.T) {
 	// But HEAD must be unchanged.
 	newTip, _ := repo.Head()
 	assert.Equal(t, originalTip.Hash(), newTip.Hash())
+}
+
+func TestClean_PreservesExplicitCommitSignatureFields(t *testing.T) {
+	store := memory.NewStorage()
+	repo, err := git.Init(store, nil)
+	require.NoError(t, err)
+
+	sig := object.Signature{
+		Name:  "Test User",
+		Email: "test@example.com",
+		When:  time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC),
+	}
+	emptyTreeHash, err := storeEmptyTree(repo)
+	require.NoError(t, err)
+
+	commit := &object.Commit{
+		Author:       sig,
+		Committer:    sig,
+		MergeTag:     "object deadbeef\n\ntag v1.0.0\n",
+		PGPSignature: "-----BEGIN PGP SIGNATURE-----\nabc\n-----END PGP SIGNATURE-----",
+		Encoding:     object.MessageEncoding("ISO-8859-1"),
+		Message:      "feat: signed commit\n\n" + defaultPattern + "\n",
+		TreeHash:     emptyTreeHash,
+	}
+	obj := store.NewEncodedObject()
+	require.NoError(t, commit.Encode(obj))
+	hash, err := store.SetEncodedObject(obj)
+	require.NoError(t, err)
+
+	ref := plumbing.NewHashReference("refs/heads/main", hash)
+	require.NoError(t, store.SetReference(ref))
+	headRef := plumbing.NewSymbolicReference(plumbing.HEAD, "refs/heads/main")
+	require.NoError(t, store.SetReference(headRef))
+	original, err := repo.CommitObject(hash)
+	require.NoError(t, err)
+
+	_, err = cleaner.Clean(repo, cleaner.Config{Pattern: defaultPattern})
+	require.NoError(t, err)
+
+	newRef, err := repo.Head()
+	require.NoError(t, err)
+	rewritten, err := repo.CommitObject(newRef.Hash())
+	require.NoError(t, err)
+
+	assert.Equal(t, original.MergeTag, rewritten.MergeTag)
+	assert.Equal(t, original.PGPSignature, rewritten.PGPSignature)
+	assert.Equal(t, original.Encoding, rewritten.Encoding)
+	assert.Equal(t, "feat: signed commit\n\n", rewritten.Message)
 }
 
 func TestClean_AllCommitsClean_HeadUnchanged(t *testing.T) {
@@ -308,5 +366,80 @@ func TestClean_CustomPattern(t *testing.T) {
 
 	assert.Equal(t, 1, result.CommitsModified)
 	msgs := commitMessages(t, repo)
-	assert.Equal(t, "ci: run tests\n", msgs[0])
+	assert.Equal(t, "ci: run tests\n\n", msgs[0])
+}
+
+func TestClean_MaxCommits_LimitsTraversal(t *testing.T) {
+	messages := []string{
+		"initial commit\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>\n",
+		"feat: middle\n",
+		"feat: latest\n",
+	}
+	repo := makeRepo(t, messages)
+	originalTip, _ := repo.Head()
+
+	cfg := cleaner.Config{
+		Pattern:    defaultPattern,
+		MaxCommits: 2,
+	}
+	result, err := cleaner.Clean(repo, cfg)
+	require.NoError(t, err)
+
+	assert.Equal(t, 2, result.CommitsScanned)
+	assert.Equal(t, 0, result.CommitsModified)
+
+	newTip, _ := repo.Head()
+	assert.Equal(t, originalTip.Hash(), newTip.Hash())
+}
+
+func TestClean_MergeCommitParentsAreRewritten(t *testing.T) {
+	store := memory.NewStorage()
+	repo, err := git.Init(store, nil)
+	require.NoError(t, err)
+
+	sig := object.Signature{
+		Name:  "Test User",
+		Email: "test@example.com",
+		When:  time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC),
+	}
+	emptyTreeHash, err := storeEmptyTree(repo)
+	require.NoError(t, err)
+
+	writeCommit := func(msg string, parents ...plumbing.Hash) plumbing.Hash {
+		commit := &object.Commit{
+			Author:       sig,
+			Committer:    sig,
+			Message:      msg,
+			TreeHash:     emptyTreeHash,
+			ParentHashes: parents,
+		}
+		obj := store.NewEncodedObject()
+		require.NoError(t, commit.Encode(obj))
+		hash, err := store.SetEncodedObject(obj)
+		require.NoError(t, err)
+		return hash
+	}
+
+	root := writeCommit("root\n")
+	left := writeCommit("left\n\n"+defaultPattern+"\n", root)
+	right := writeCommit("right\n", root)
+	merge := writeCommit("merge branch\n", left, right)
+
+	ref := plumbing.NewHashReference("refs/heads/main", merge)
+	require.NoError(t, store.SetReference(ref))
+	headRef := plumbing.NewSymbolicReference(plumbing.HEAD, "refs/heads/main")
+	require.NoError(t, store.SetReference(headRef))
+
+	result, err := cleaner.Clean(repo, cleaner.Config{Pattern: defaultPattern})
+	require.NoError(t, err)
+	assert.Equal(t, 4, result.CommitsScanned)
+	assert.Equal(t, 1, result.CommitsModified)
+
+	newHeadRef, err := repo.Head()
+	require.NoError(t, err)
+	newMerge, err := repo.CommitObject(newHeadRef.Hash())
+	require.NoError(t, err)
+	require.Len(t, newMerge.ParentHashes, 2)
+	assert.NotEqual(t, left, newMerge.ParentHashes[0], "left parent should be rewritten")
+	assert.Equal(t, right, newMerge.ParentHashes[1], "right parent should remain unchanged")
 }

@@ -1,189 +1,95 @@
-# Skill: p3c – Git History Co-Author Cleaner
+---
+name: p3c
+description: Rewrite git commit history on the current branch to remove an exact-match line from commit messages, especially `Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>`. Use when sanitizing commit messages, removing AI co-author trailers, previewing a history rewrite, or operating the p3c CLI or cleaner library.
+license: MIT
+compatibility: Requires a git repository. Building from source requires Go 1.24.13+; running the compiled CLI does not.
+metadata:
+  owner: gpablo6
+  language: go
+---
 
-## Overview
+# p3c
 
-`p3c` (Pesky Claude Code Co-Author) is a CLI tool that rewrites a git
-repository's commit history to remove a specific line from every commit
-message.  It was designed to strip the AI co-author trailer:
+Use this skill when working on the `p3c` project itself or when operating the
+compiled `p3c` binary against a repository.
 
-```
+## What it does
+
+`p3c` rewrites the current branch history and removes every commit-message line
+that exactly matches a target pattern.
+
+Default pattern:
+
+```text
 Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
 ```
 
-but it supports any literal line via the `--pattern` flag.
+The tool preserves all other commit-message content as-is. It does not collapse
+blank lines or normalize whitespace.
 
----
+## How to use it
 
-## When to use this skill
+Run from inside the repository whose current branch you want to rewrite.
 
-Use `p3c` when you need to:
-
-- Remove an AI co-author trailer from every commit in a branch's history.
-- Strip any exact-match line from commit messages across the full git log.
-- Preview what would be removed before applying changes (dry-run).
-- Automate history sanitisation as part of a CI/CD pipeline or release process.
-
----
-
-## Prerequisites
-
-- The repository must be a valid git repository (a `.git` directory must be
-  reachable from the working directory).
-- The user must have write access to the repository (the branch reference is
-  updated in place).
-- Go ≥ 1.21 is required **only** to build from source; the pre-built binary
-  has no runtime dependencies.
-
----
-
-## Installation
-
-```bash
-# From source
-go install github.com/gpablo6/p3c@latest
-
-# Or build locally
-git clone https://github.com/gpablo6/p3c.git
-cd p3c && go build -o p3c .
-```
-
----
-
-## Command reference
-
-```
-p3c [flags]
-
-Flags:
-  -p, --pattern string   Exact line to remove from commit messages
-                         (default: "Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>")
-  -n, --dry-run          Preview changes without writing to the repo
-  -v, --verbose          Print each commit SHA and subject as it is rewritten
-  -h, --help             Show help
-```
-
----
-
-## Usage examples
-
-### 1. Remove the default Claude trailer (standard use-case)
-
-```bash
-cd /path/to/repo
-p3c
-git push --force-with-lease
-```
-
-**Expected output:**
-```
-Scanned 47 commit(s). Cleaned 12 commit message(s).
-
-Remember to force-push to update any remote branches:
-  git push --force-with-lease
-```
-
-### 2. Dry-run (preview only, no writes)
+Preview only:
 
 ```bash
 p3c --dry-run
 ```
 
-**Expected output:**
-```
-Dry-run mode – no changes will be written.
-Scanned 47 commit(s). Would clean 12 commit message(s).
-```
-
-### 3. Remove a custom trailer
+Apply the rewrite:
 
 ```bash
-p3c --pattern "Signed-off-by: Automated Bot <bot@corp.example>"
+p3c
+git push --force-with-lease
 ```
 
-### 4. Verbose output
+Use a custom exact-match line:
 
 ```bash
-p3c --verbose
-# rewriting a1b2c3d: "feat: add payment flow"
-# rewriting e4f5g6h: "fix: handle edge case"
-# Scanned 47 commit(s). Cleaned 2 commit message(s).
+p3c --pattern "Signed-off-by: Automated Bot <bot@example.com>"
 ```
 
----
-
-## Behaviour details
-
-| Scenario | Behaviour |
-|---|---|
-| Pattern found in commit message | Line is removed; consecutive blank lines collapsed; trailing blank lines stripped. |
-| Pattern not found | Commit is left untouched; its SHA does not change. |
-| Child commit of a rewritten parent | Rewritten to update parent pointer; message unchanged. |
-| Multiple occurrences of pattern in one message | All occurrences removed. |
-| Entire message is only the target line | Message becomes empty string. |
-| No commits match | Repository unchanged; exit 0. |
-| Dry-run | Reports count; writes nothing; exit 0. |
-| Not inside a git repository | Error message; exit 1. |
-
----
-
-## Caveats and safety notes
-
-1. **History is rewritten.** All commit SHAs from the first affected commit to
-   HEAD change.  Force-push is required to update remotes.
-2. **Operate on a clean working tree** and ensure collaborators are not
-   working on the branch.
-3. **Take a backup** before running:
-   ```bash
-   git branch backup/$(git branch --show-current)
-   ```
-4. `p3c` modifies only the current HEAD branch.  Other branches, stashes, and
-   tags that point to rewritten commits are **not** automatically updated.
-
----
-
-## API (Go library)
-
-`p3c` can also be used as a Go library:
-
-```go
-import (
-    gogit "github.com/go-git/go-git/v5"
-    "github.com/gpablo6/p3c/internal/cleaner"
-)
-
-repo, _ := gogit.PlainOpen("/path/to/repo")
-
-result, err := cleaner.Clean(repo, cleaner.Config{
-    Pattern: cleaner.DefaultPattern,  // or any literal line
-    DryRun:  false,
-    Verbose: true,
-})
-
-fmt.Printf("Scanned: %d, Modified: %d\n", result.CommitsScanned, result.CommitsModified)
-```
-
-### Key exported symbols
-
-| Symbol | Type | Description |
-|---|---|---|
-| `DefaultPattern` | `const string` | The Claude Opus co-author trailer. |
-| `Config` | `struct` | Configuration for a `Clean` call. |
-| `Result` | `struct` | Summary of a completed `Clean` call. |
-| `Clean(repo, cfg)` | `func` | Rewrites history in the given `go-git` repository. |
-| `StripLine(msg, pat)` | `func` | Removes all occurrences of `pat` from a single message string. |
-
----
-
-## Testing
+Limit traversal to recent history:
 
 ```bash
-go test ./...
+p3c --max-commits 500
 ```
 
-The test suite covers:
+Keep the backup ref after a successful run:
 
-- `StripLine`: line removal, no-match, multiple occurrences, consecutive blank
-  line collapsing, empty message, message that is only the target line.
-- `Clean`: no matching commits, single modified commit, multiple modified
-  commits, parent-chain rewriting, metadata preservation, dry-run mode, custom
-  pattern.
+```bash
+p3c --keep-backup
+```
+
+Prune unreachable loose objects:
+
+```bash
+p3c --gc-after-run
+p3c --gc-on-failure
+```
+
+## Current behavior
+
+- Operates on the checked-out `HEAD` branch.
+- Rewrites downstream commits when parent hashes change.
+- Creates a temporary backup branch ref before rewriting.
+- Restores the original branch ref if cleaning fails.
+- Removes the temporary backup ref on success unless `--keep-backup` is used.
+- Optional prune flags use go-git native prune for unreachable loose objects.
+- If history changes, rewritten SHAs must be force-pushed manually.
+
+## Key files
+
+- `cmd/root.go`: CLI flags, backup lifecycle, rollback, optional prune flow.
+- `internal/cleaner/cleaner.go`: exact line removal and commit graph rewrite.
+- `internal/cleaner/cleaner_test.go`: core rewrite and message-preservation tests.
+- `cmd/root_test.go`: command-level tests using temp filesystem repositories.
+
+## Maintenance notes
+
+- Keep `SKILL.md` aligned with actual CLI behavior and flags.
+- If flags or rewrite semantics change, update this file and `README.md`
+  together.
+- Preserve the exact-match semantics in documentation: remove only the target
+  line, leave all other message bytes intact.

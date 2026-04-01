@@ -1,35 +1,30 @@
 package cmd
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
-	"github.com/spf13/cobra"
+	"github.com/go-git/go-git/v5/storage/memory"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/gpablo6/p3c/internal/cleaner"
+	"github.com/gpablo6/p3c/internal/history"
+	"github.com/gpablo6/p3c/internal/workflow"
 )
 
-func TestRun_RemovesBackupByDefault(t *testing.T) {
+func TestMessageClean_RemovesBackupByDefault(t *testing.T) {
 	repoDir, repo := makeRepoWithPatternCommit(t)
 	withCWD(t, repoDir)
 	resetCmdTestState(t)
 
-	flagPattern = cleaner.DefaultPattern
-	flagDryRun = false
-	flagVerbose = false
-	flagMax = 0
-	flagKeepBak = false
-
-	err := run(&cobra.Command{}, nil)
+	_, _, err := executeRootCmd(t, "message", "clean")
 	require.NoError(t, err)
 
 	head, err := repo.Head()
@@ -37,10 +32,13 @@ func TestRun_RemovesBackupByDefault(t *testing.T) {
 	c, err := repo.CommitObject(head.Hash())
 	require.NoError(t, err)
 	assert.Equal(t, "feat: add feature\n\n", c.Message)
-	assert.Empty(t, listBackupRefs(t, repo))
+
+	refs, err := defaultBackupService().List(repoDir)
+	require.NoError(t, err)
+	assert.Empty(t, refs)
 }
 
-func TestRun_KeepBackupFlagRetainsBackupRef(t *testing.T) {
+func TestMessageClean_KeepBackupFlagRetainsBackupRef(t *testing.T) {
 	repoDir, repo := makeRepoWithPatternCommit(t)
 	withCWD(t, repoDir)
 	resetCmdTestState(t)
@@ -51,55 +49,39 @@ func TestRun_KeepBackupFlagRetainsBackupRef(t *testing.T) {
 	origHead, err := repo.Head()
 	require.NoError(t, err)
 
-	flagPattern = cleaner.DefaultPattern
-	flagDryRun = false
-	flagVerbose = false
-	flagMax = 0
-	flagKeepBak = true
-
-	err = run(&cobra.Command{}, nil)
+	_, _, err = executeRootCmd(t, "message", "clean", "--keep-backup")
 	require.NoError(t, err)
 
-	backups := listBackupRefs(t, repo)
-	require.Len(t, backups, 1)
-	assert.Equal(t, origHead.Hash(), backups[0].Hash())
+	refs, err := defaultBackupService().List(repoDir)
+	require.NoError(t, err)
+	require.Len(t, refs, 1)
+	assert.Equal(t, origHead.Hash(), refs[0].Hash())
 }
 
-func TestRun_ReportsTemporaryBackupReference(t *testing.T) {
+func TestMessageClean_ReportsTemporaryBackupReference(t *testing.T) {
 	repoDir, _ := makeRepoWithPatternCommit(t)
 	withCWD(t, repoDir)
 	resetCmdTestState(t)
 
-	cmd := &cobra.Command{}
-	var stdout strings.Builder
-	cmd.SetOut(&stdout)
-	cmd.SetErr(&stdout)
-
-	flagPattern = cleaner.DefaultPattern
-	flagDryRun = false
-
-	err := run(cmd, nil)
+	stdout, _, err := executeRootCmd(t, "message", "clean")
 	require.NoError(t, err)
-	assert.Contains(t, stdout.String(), "Created temporary backup reference:")
+	assert.Contains(t, stdout, "Created temporary backup reference:")
 }
 
-func TestRun_DryRunDoesNotCreateBackup(t *testing.T) {
-	repoDir, repo := makeRepoWithPatternCommit(t)
+func TestMessageClean_DryRunDoesNotCreateBackup(t *testing.T) {
+	repoDir, _ := makeRepoWithPatternCommit(t)
 	withCWD(t, repoDir)
 	resetCmdTestState(t)
 
-	flagPattern = cleaner.DefaultPattern
-	flagDryRun = true
-	flagVerbose = false
-	flagMax = 0
-	flagKeepBak = false
-
-	err := run(&cobra.Command{}, nil)
+	_, _, err := executeRootCmd(t, "message", "clean", "--dry-run")
 	require.NoError(t, err)
-	assert.Empty(t, listBackupRefs(t, repo))
+
+	refs, err := defaultBackupService().List(repoDir)
+	require.NoError(t, err)
+	assert.Empty(t, refs)
 }
 
-func TestRun_RestoresHeadWhenCleanerFails(t *testing.T) {
+func TestMessageClean_RestoresHeadWhenRewriteFails(t *testing.T) {
 	repoDir, repo := makeRepoWithPatternCommit(t)
 	withCWD(t, repoDir)
 	resetCmdTestState(t)
@@ -107,33 +89,26 @@ func TestRun_RestoresHeadWhenCleanerFails(t *testing.T) {
 	origHead, err := repo.Head()
 	require.NoError(t, err)
 
-	runCleaner = func(_ *git.Repository, _ cleaner.Config) (*cleaner.Result, error) {
+	runHistoryRewrite = func(_ *git.Repository, _ history.Config) (*history.Result, error) {
 		return nil, errors.New("forced failure")
 	}
 
-	flagPattern = cleaner.DefaultPattern
-	flagDryRun = false
-	flagVerbose = false
-	flagMax = 0
-	flagKeepBak = false
-
-	err = run(&cobra.Command{}, nil)
+	_, _, err = executeRootCmd(t, "message", "clean")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "forced failure")
 
-	newHead, headErr := repo.Head()
-	require.NoError(t, headErr)
+	newHead, err := repo.Head()
+	require.NoError(t, err)
 	assert.Equal(t, origHead.Hash(), newHead.Hash())
-	require.Len(t, listBackupRefs(t, repo), 1)
 }
 
-func TestRun_GCOnFailureFlagRunsGC(t *testing.T) {
+func TestMessageClean_GCOnFailureFlagRunsGC(t *testing.T) {
 	repoDir, _ := makeRepoWithPatternCommit(t)
 	withCWD(t, repoDir)
 	resetCmdTestState(t)
 
 	called := 0
-	runCleaner = func(_ *git.Repository, _ cleaner.Config) (*cleaner.Result, error) {
+	runHistoryRewrite = func(_ *git.Repository, _ history.Config) (*history.Result, error) {
 		return nil, errors.New("forced failure")
 	}
 	runGitGC = func(_ *git.Repository) error {
@@ -141,16 +116,12 @@ func TestRun_GCOnFailureFlagRunsGC(t *testing.T) {
 		return nil
 	}
 
-	flagPattern = cleaner.DefaultPattern
-	flagDryRun = false
-	flagGCFail = true
-
-	err := run(&cobra.Command{}, nil)
+	_, _, err := executeRootCmd(t, "message", "clean", "--gc-on-failure")
 	require.Error(t, err)
 	assert.Equal(t, 1, called)
 }
 
-func TestRun_GCAfterRunFlagRunsGC(t *testing.T) {
+func TestMessageClean_GCAfterRunFlagRunsGC(t *testing.T) {
 	repoDir, _ := makeRepoWithPatternCommit(t)
 	withCWD(t, repoDir)
 	resetCmdTestState(t)
@@ -161,39 +132,112 @@ func TestRun_GCAfterRunFlagRunsGC(t *testing.T) {
 		return nil
 	}
 
-	flagPattern = cleaner.DefaultPattern
-	flagDryRun = false
-	flagGCAfter = true
-
-	err := run(&cobra.Command{}, nil)
+	_, _, err := executeRootCmd(t, "message", "clean", "--gc-after-run")
 	require.NoError(t, err)
 	assert.Equal(t, 1, called)
 }
 
-func TestCreateBackupRef_AvoidsNameCollisions(t *testing.T) {
+func TestBackupClean_RemovesOnlyP3CBackupRefs(t *testing.T) {
 	repoDir, repo := makeRepoWithPatternCommit(t)
 	withCWD(t, repoDir)
 	resetCmdTestState(t)
-	nowUTC = func() time.Time {
-		return time.Date(2026, 3, 18, 21, 15, 16, 0, time.UTC)
-	}
+
+	_, _, err := executeRootCmd(t, "message", "clean", "--keep-backup")
+	require.NoError(t, err)
+
+	refs, err := defaultBackupService().List(repoDir)
+	require.NoError(t, err)
+	require.Len(t, refs, 1)
+	backupRefName := refs[0].Name()
 
 	headRef, err := repo.Head()
 	require.NoError(t, err)
+	manual := plumbing.ReferenceName("refs/heads/backup/manual-keep")
+	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(manual, headRef.Hash())))
 
-	first, err := createBackupRef(repo, headRef)
-	require.NoError(t, err)
-	second, err := createBackupRef(repo, headRef)
+	_, _, err = executeRootCmd(t, "backup", "clean")
 	require.NoError(t, err)
 
-	assert.NotEqual(t, first, second)
-	assert.True(t, strings.HasPrefix(first.String(), "refs/heads/backup/p3c-"))
-	assert.True(t, strings.HasPrefix(second.String(), first.String()+"-") || strings.HasPrefix(second.String(), "refs/heads/backup/p3c-"))
+	_, err = repo.Storer.Reference(backupRefName)
+	require.ErrorIs(t, err, plumbing.ErrReferenceNotFound)
+	_, err = repo.Storer.Reference(manual)
+	require.NoError(t, err)
+}
 
-	_, err = repo.Storer.Reference(first)
+func TestBackupClean_DryRunPreservesRefs(t *testing.T) {
+	repoDir, repo := makeRepoWithPatternCommit(t)
+	withCWD(t, repoDir)
+	resetCmdTestState(t)
+
+	_, _, err := executeRootCmd(t, "message", "clean", "--keep-backup")
 	require.NoError(t, err)
-	_, err = repo.Storer.Reference(second)
+
+	refs, err := defaultBackupService().List(repoDir)
 	require.NoError(t, err)
+	require.Len(t, refs, 1)
+	refName := refs[0].Name()
+
+	_, _, err = executeRootCmd(t, "backup", "clean", "--dry-run")
+	require.NoError(t, err)
+
+	_, err = repo.Storer.Reference(refName)
+	require.NoError(t, err)
+}
+
+func TestIdentityRewrite_RewritesBothAuthorAndCommitter(t *testing.T) {
+	repoDir, repo, hash := makeRepoWithIdentityCommit(t)
+	withCWD(t, repoDir)
+	resetCmdTestState(t)
+	openRepository = func(string) (*git.Repository, error) { return repo, nil }
+
+	orig, err := repo.CommitObject(hash)
+	require.NoError(t, err)
+	require.NotEmpty(t, orig.PGPSignature)
+
+	_, _, err = executeRootCmd(t,
+		"identity", "rewrite",
+		"--from", "copilot-swe-agent[bot] <198982749+Copilot@users.noreply.github.com>",
+		"--to", "gpablo6 <gpablo6@outlook.com>",
+		"--scope", "both",
+		"--keep-backup",
+	)
+	require.NoError(t, err)
+
+	headRef, err := repo.Head()
+	require.NoError(t, err)
+	rewritten, err := repo.CommitObject(headRef.Hash())
+	require.NoError(t, err)
+	assert.Equal(t, "gpablo6", rewritten.Author.Name)
+	assert.Equal(t, "gpablo6@outlook.com", rewritten.Author.Email)
+	assert.Equal(t, "gpablo6", rewritten.Committer.Name)
+	assert.Equal(t, "gpablo6@outlook.com", rewritten.Committer.Email)
+	assert.Empty(t, rewritten.PGPSignature)
+}
+
+func TestRootHelp_ListsExplicitSubcommands(t *testing.T) {
+	resetCmdTestState(t)
+
+	stdout, _, err := executeRootCmd(t, "--help")
+	require.NoError(t, err)
+	assert.Contains(t, stdout, "p3c message clean")
+	assert.Contains(t, stdout, "p3c identity rewrite")
+	assert.Contains(t, stdout, "p3c backup clean")
+}
+
+func executeRootCmd(t *testing.T, args ...string) (string, string, error) {
+	t.Helper()
+	cmd := newRootCmd()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs(args)
+	err := cmd.Execute()
+	return stdout.String(), stderr.String(), err
+}
+
+func defaultBackupService() *workflow.BackupService {
+	return &workflow.BackupService{OpenRepository: openRepository}
 }
 
 func makeRepoWithPatternCommit(t *testing.T) (string, *git.Repository) {
@@ -212,26 +256,69 @@ func makeRepoWithPatternCommit(t *testing.T) (string, *git.Repository) {
 	writeAndCommit := func(name, content, message string) plumbing.Hash {
 		path := filepath.Join(dir, name)
 		require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
-		wt, wtErr := repo.Worktree()
-		require.NoError(t, wtErr)
-		_, addErr := wt.Add(name)
-		require.NoError(t, addErr)
-		hash, commitErr := wt.Commit(message, &git.CommitOptions{
+		wt, err := repo.Worktree()
+		require.NoError(t, err)
+		_, err = wt.Add(name)
+		require.NoError(t, err)
+		hash, err := wt.Commit(message, &git.CommitOptions{
 			Author:    sig,
 			Committer: sig,
 		})
-		require.NoError(t, commitErr)
+		require.NoError(t, err)
 		return hash
 	}
 
 	_ = writeAndCommit("a.txt", "first", "chore: init\n")
-	_ = writeAndCommit(
-		"a.txt",
-		"second",
-		"feat: add feature\n\n"+cleaner.DefaultPattern+"\n",
-	)
-
+	_ = writeAndCommit("a.txt", "second", "feat: add feature\n\n"+history.DefaultPattern+"\n")
 	return dir, repo
+}
+
+func makeRepoWithIdentityCommit(t *testing.T) (string, *git.Repository, plumbing.Hash) {
+	t.Helper()
+
+	dir := t.TempDir()
+	_, err := git.PlainInit(dir, false)
+	require.NoError(t, err)
+
+	store := memory.NewStorage()
+	repo, err := git.Init(store, nil)
+	require.NoError(t, err)
+
+	sig := object.Signature{
+		Name:  "copilot-swe-agent[bot]",
+		Email: "198982749+Copilot@users.noreply.github.com",
+		When:  time.Date(2026, 3, 18, 21, 0, 0, 0, time.UTC),
+	}
+	emptyTreeHash, err := storeEmptyTree(repo)
+	require.NoError(t, err)
+
+	commit := &object.Commit{
+		Author:       sig,
+		Committer:    sig,
+		PGPSignature: "-----BEGIN PGP SIGNATURE-----\nabc\n-----END PGP SIGNATURE-----\n",
+		Message:      "feat: authored by bot\n",
+		TreeHash:     emptyTreeHash,
+	}
+	obj := store.NewEncodedObject()
+	require.NoError(t, commit.Encode(obj))
+	hash, err := store.SetEncodedObject(obj)
+	require.NoError(t, err)
+
+	ref := plumbing.NewHashReference("refs/heads/main", hash)
+	require.NoError(t, store.SetReference(ref))
+	headRef := plumbing.NewSymbolicReference(plumbing.HEAD, "refs/heads/main")
+	require.NoError(t, store.SetReference(headRef))
+
+	return dir, repo, hash
+}
+
+func storeEmptyTree(repo *git.Repository) (plumbing.Hash, error) {
+	tree := &object.Tree{}
+	obj := repo.Storer.NewEncodedObject()
+	if err := tree.Encode(obj); err != nil {
+		return plumbing.ZeroHash, err
+	}
+	return repo.Storer.SetEncodedObject(obj)
 }
 
 func withCWD(t *testing.T, dir string) {
@@ -249,44 +336,15 @@ func resetCmdTestState(t *testing.T) {
 	openRepository = func(wd string) (*git.Repository, error) {
 		return git.PlainOpenWithOptions(wd, &git.PlainOpenOptions{DetectDotGit: true})
 	}
-	runCleaner = cleaner.Clean
+	runHistoryRewrite = history.Rewrite
 	nowUTC = func() time.Time { return time.Now().UTC() }
 	runGitGC = executeGitGC
-	flagPattern = cleaner.DefaultPattern
-	flagDryRun = false
-	flagVerbose = false
-	flagMax = 0
-	flagKeepBak = false
-	flagGCFail = false
-	flagGCAfter = false
 	t.Cleanup(func() {
 		openRepository = func(wd string) (*git.Repository, error) {
 			return git.PlainOpenWithOptions(wd, &git.PlainOpenOptions{DetectDotGit: true})
 		}
-		runCleaner = cleaner.Clean
+		runHistoryRewrite = history.Rewrite
 		nowUTC = func() time.Time { return time.Now().UTC() }
 		runGitGC = executeGitGC
-		flagPattern = cleaner.DefaultPattern
-		flagDryRun = false
-		flagVerbose = false
-		flagMax = 0
-		flagKeepBak = false
-		flagGCFail = false
-		flagGCAfter = false
 	})
-}
-
-func listBackupRefs(t *testing.T, repo *git.Repository) []*plumbing.Reference {
-	t.Helper()
-	iter, err := repo.Storer.IterReferences()
-	require.NoError(t, err)
-
-	var out []*plumbing.Reference
-	require.NoError(t, iter.ForEach(func(ref *plumbing.Reference) error {
-		if strings.HasPrefix(ref.Name().String(), "refs/heads/backup/") {
-			out = append(out, ref)
-		}
-		return nil
-	}))
-	return out
 }

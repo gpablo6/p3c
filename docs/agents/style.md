@@ -30,7 +30,7 @@ This codebase follows standard Go conventions with a few repo-specific expectati
 - Exported identifiers use `CamelCase`
 - Unexported identifiers use `camelCase`
 - Test names follow `TestXxx_Scenario`
-- In `cmd/root.go`, flag state uses `flagX` globals
+- Prefer per-command flag structs over package-level flag globals
 - Prefer repo domain terms such as `clean`, `pattern`, `backup`, `rewrite`, `repo`, and `commit`
 
 ## Types and API Shape
@@ -81,11 +81,13 @@ Examples from the existing code style:
 - Preserve compare-and-set semantics around branch ref updates
 - Keep dry-run side-effect free
 
-## `internal/cleaner` Expectations
+## `internal/history` Expectations
 
-When touching `internal/cleaner`:
+When touching `internal/history`:
 
 - Preserve commit metadata when rewriting commits
+- Clear `PGPSignature` on rewritten commits because the old signature no longer
+  matches the new commit object
 - Preserve exact message content except for the removed target line
 - Do not normalize whitespace beyond the exact intended removal
 - Maintain correct parent rewriting, including merge commits
@@ -99,6 +101,7 @@ When touching `cmd/`:
 - Preserve explicit user messaging for destructive operations
 - Keep hidden or reserved flags clearly marked
 - Treat backup ref handling and GC orchestration as part of the command contract
+- Keep `cmd/` thin: argument parsing and output only, orchestration belongs in `internal/workflow`
 
 ## Testing Style
 

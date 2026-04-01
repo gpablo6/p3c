@@ -1,7 +1,10 @@
 # p3c — Pesky Claude Code Co-Author
 
-`p3c` is a small, single-binary CLI tool written in Go that scrubs AI
-co-author trailers from every commit in a git repository's history.
+`p3c` is a small, single-binary CLI tool written in Go that rewrites git
+history safely for two focused use cases:
+
+- removing exact-match lines from commit messages
+- rewriting exact-match author/committer identities
 
 It was built specifically to remove the line
 
@@ -18,15 +21,19 @@ use it to clean any commit-message trailer you need to remove.
 
 `p3c` uses [go-git](https://github.com/go-git/go-git) – a pure-Go git
 implementation – to rewrite history without spawning any external processes.
-For every commit reachable from `HEAD`:
+For every rewritten commit reachable from `HEAD`:
 
 1. The commit message is scanned for the target line.
-2. If found, a new commit object is created with only that exact line removed.
-   All other commit-message content is preserved as-is.
-3. All downstream commits that referenced a rewritten parent are also rewritten
+2. Author and committer identities can optionally be rewritten when they match
+   an exact source identity.
+3. If a commit changes, a new commit object is created with only the requested
+   fields updated.
+4. All downstream commits that referenced a rewritten parent are also rewritten
    so the DAG remains internally consistent.
-4. The current branch reference is updated to the new tip.
-5. Before rewriting, p3c creates a backup branch reference and removes it after
+5. Any rewritten commit has its stale `PGPSignature` cleared because the old
+   signature no longer matches the new commit object.
+6. The current branch reference is updated to the new tip.
+7. Before rewriting, p3c creates a backup branch reference and removes it after
    success unless you opt to keep it.
 
 No files in the working tree are touched.
@@ -60,13 +67,18 @@ mv p3c /usr/local/bin/
 cd /path/to/your-repo
 
 # 1. Preview changes without modifying the repo:
-p3c --dry-run
+p3c message clean --dry-run
 
-# 2. Apply the clean:
-p3c
+# 2. Apply the commit-message clean:
+p3c message clean
 
 # 3. Force-push to update the remote branch:
 git push --force-with-lease
+
+# 4. Rewrite commit identities on the current branch:
+p3c identity rewrite \
+  --from "copilot-swe-agent[bot] <198982749+Copilot@users.noreply.github.com>" \
+  --to "gpablo6 <gpablo6@outlook.com>"
 ```
 
 ---
@@ -75,46 +87,58 @@ git push --force-with-lease
 
 ```
 Usage:
-  p3c [flags]
+  p3c [command]
 
-Flags:
-  -n, --dry-run          Show what would be changed without modifying the repository
-      --gc-after-run     Prune unreachable loose objects after a successful run
-      --gc-on-failure    Prune unreachable loose objects if cleaning fails after creating rewritten objects
-  -h, --help             help for p3c
-      --keep-backup      Keep the temporary backup branch after a successful rewrite
-      --max-commits int  Limit traversal to the most recent N commits (default: all)
-  -p, --pattern string   Exact line to remove from commit messages
-                         (default "Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>")
-  -v, --verbose          Print each commit that is rewritten
+Commands:
+  backup      Manage p3c backup refs
+  message     Rewrite commit messages
+  identity    Rewrite author and committer identities in commit history
 ```
 
 ### Examples
 
 ```bash
 # Remove the default Claude Opus co-author trailer:
-p3c
+p3c message clean
 
 # Preview without writing (dry-run):
-p3c --dry-run
+p3c message clean --dry-run
 
 # Remove a custom trailer:
-p3c --pattern "Signed-off-by: Bot <bot@ci.example.com>"
+p3c message clean --pattern "Signed-off-by: Bot <bot@ci.example.com>"
 
 # Verbose output (shows each rewritten commit SHA and subject):
-p3c --verbose
+p3c message clean --verbose
 
 # Process only the latest 500 commits from HEAD:
-p3c --max-commits 500
+p3c message clean --max-commits 500
 
 # Keep backup reference after a successful run:
-p3c --keep-backup
+p3c message clean --keep-backup
+
+# Remove local p3c backup refs after you've force-pushed:
+p3c backup clean
 
 # Prune unreachable loose objects after successful rewrite:
-p3c --gc-after-run
+p3c message clean --gc-after-run
 
 # Prune unreachable loose objects only if rewrite fails:
-p3c --gc-on-failure
+p3c message clean --gc-on-failure
+
+# Rewrite both author and committer when they exactly match a source identity:
+p3c identity rewrite \
+  --from "copilot-swe-agent[bot] <198982749+Copilot@users.noreply.github.com>" \
+  --to "gpablo6 <gpablo6@outlook.com>"
+
+# Same rewrite using split flags:
+p3c identity rewrite \
+  --from-name "copilot-swe-agent[bot]" \
+  --from-email "198982749+Copilot@users.noreply.github.com" \
+  --to-name "gpablo6" \
+  --to-email "gpablo6@outlook.com"
+
+# Rewrite only the author field:
+p3c identity rewrite --from "Old Name <old@example.com>" --to "New Name <new@example.com>" --scope author
 ```
 
 ---
@@ -137,8 +161,12 @@ shared branch:
 
 - Exact match semantics: p3c removes only lines that exactly match the target
   pattern. It intentionally does not normalize whitespace.
+- Identity rewrite semantics: identity rewrites require exact match on both
+  name and email.
 - Message preservation: aside from removing the matched line(s), commit
   messages are preserved as-is (including blank lines/newline style).
+- Signature handling: rewritten commits have `PGPSignature` cleared because the
+  original signature no longer applies to the rewritten commit object.
 - Atomic ref update: rewritten objects are created first; the branch ref is
   updated at the end with compare-and-set semantics.
 - Safety fallback: before rewrite, p3c creates a temporary backup reference.
@@ -172,12 +200,22 @@ go build -o p3c .
 p3c/
 ├── main.go                  # Entry point
 ├── cmd/
-│   ├── root.go              # Cobra CLI command definition
-│   └── root_test.go         # Command-level tests
+│   ├── root.go              # Root command and service wiring
+│   ├── root_test.go         # Command-level integration tests
+│   ├── message/
+│   │   └── clean.go         # `p3c message clean`
+│   ├── identity/
+│   │   ├── rewrite.go       # `p3c identity rewrite`
+│   │   └── rewrite_test.go  # Identity flag parsing tests
+│   └── backup/
+│       └── clean.go         # `p3c backup clean`
 ├── internal/
-│   └── cleaner/
-│       ├── cleaner.go       # Core history-rewriting logic
-│       └── cleaner_test.go  # Unit test suite
+│   ├── workflow/
+│   │   ├── rewrite.go       # Rewrite lifecycle orchestration
+│   │   └── backup.go        # Backup ref listing and cleanup
+│   └── history/
+│       ├── history.go       # Core history-rewriting logic
+│       └── history_test.go  # Unit test suite
 ├── SKILL.md                 # Agentic tool skill descriptor
 └── docs/agents/             # Repo-specific style and testing guidance
 ```

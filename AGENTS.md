@@ -9,7 +9,8 @@ Agent guidance for `github.com/gpablo6/p3c`.
 - Module: `github.com/gpablo6/p3c`
 - Entry point: `main.go`
 - CLI package: `cmd/`
-- Rewrite logic: `internal/cleaner/`
+- Rewrite logic: `internal/history/`
+- Workflow orchestration: `internal/workflow/`
 
 ## Instruction Files Checked
 
@@ -36,7 +37,11 @@ If Cursor or Copilot rule files are added later, treat them as repository-specif
 
 ## Repo Landmarks
 
-- `cmd/root.go`: Cobra command, flags, backup flow, CLI output
+- `cmd/root.go`: root command and subcommand registration
+- `cmd/message/clean.go`: message cleanup command
+- `cmd/identity/rewrite.go`: identity rewrite command
+- `cmd/backup/clean.go`: backup cleanup command
 - `cmd/root_test.go`: command-level tests
-- `internal/cleaner/cleaner.go`: history rewrite implementation
-- `internal/cleaner/cleaner_test.go`: rewrite and message-strip tests
+- `internal/workflow/`: rewrite lifecycle and backup ref orchestration
+- `internal/history/history.go`: history rewrite implementation
+- `internal/history/history_test.go`: rewrite and message-strip tests

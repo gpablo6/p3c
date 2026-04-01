@@ -21,7 +21,7 @@ Use `go build ./...` after package wiring changes, exported API changes, or CLI 
 ## Formatting
 
 - Format changed files with `gofmt -w`
-- Example: `gofmt -w main.go cmd/root.go internal/cleaner/cleaner.go`
+- Example: `gofmt -w main.go cmd/root.go internal/history/history.go`
 
 Run `gofmt` before tests when editing Go files.
 
@@ -41,9 +41,10 @@ Do not assume `golangci-lint`, `staticcheck`, or `go vet` are part of the requir
 
 - Run all tests: `go test ./...`
 - Run one package: `go test ./cmd`
-- Run cleaner package only: `go test ./internal/cleaner`
-- Run one test by exact name: `go test ./internal/cleaner -run TestClean_CustomPattern`
-- Run one CLI test: `go test ./cmd -run TestRun_GCAfterRunFlagRunsGC`
+- Run history package only: `go test ./internal/history`
+- Run workflow package only: `go test ./internal/workflow`
+- Run one test by exact name: `go test ./internal/history -run TestRewrite_MaxCommits_LimitsTraversal`
+- Run one CLI test: `go test ./cmd -run TestMessageClean_GCAfterRunFlagRunsGC`
 - Disable test caching when validating tricky changes: `go test -count=1 ./...`
 
 ## Single-Test Workflow
@@ -52,10 +53,10 @@ Prefer package-targeted test runs instead of `go test ./... -run ...`.
 
 Good examples:
 
-- `go test ./internal/cleaner -run TestStripLine_RemovesTargetLine`
-- `go test ./internal/cleaner -run TestClean_MergeCommitParentsAreRewritten`
-- `go test ./internal/cleaner -run 'TestClean_(CustomPattern|MaxCommits_LimitsTraversal)'`
-- `go test ./cmd -run TestRun_KeepBackupFlagRetainsBackupRef`
+- `go test ./internal/history -run TestStripLine_RemovesTargetLine`
+- `go test ./internal/history -run TestRewrite_MergeCommitParentsAreRewritten`
+- `go test ./internal/history -run 'TestRewrite_(SingleCommitWithPattern|MaxCommits_LimitsTraversal)'`
+- `go test ./cmd -run TestMessageClean_KeepBackupFlagRetainsBackupRef`
 
 Why this matters:
 
@@ -86,8 +87,13 @@ Usually no Go test run is required, but keep examples and flags aligned with the
 
 ## Current Test Layout
 
-- `cmd/root_test.go`: command behavior, backup refs, rollback, GC hooks, backup naming, and backup messaging
-- `internal/cleaner/cleaner_test.go`: `StripLine`, history rewrite behavior, metadata preservation, merge handling, dry-run behavior
+- `cmd/root_test.go`: command behavior for `message clean`, `identity rewrite`, and `backup clean`
+- `cmd/message/clean_test.go`: command-local validation tests for message cleanup
+- `cmd/backup/clean_test.go`: command-local backup cleanup output and behavior tests
+- `cmd/identity/rewrite_test.go`: identity flag parsing and validation
+- `internal/workflow/rewrite_test.go`: rewrite lifecycle and backup-ref behavior
+- `internal/workflow/backup_test.go`: backup service listing and cleanup behavior
+- `internal/history/history_test.go`: `StripLine`, history rewrite behavior, identity rewrite behavior, signature handling, merge handling, dry-run behavior
 
 ## Useful Existing Test Names
 
@@ -95,14 +101,15 @@ Examples already in the repo:
 
 - `TestStripLine_RemovesTargetLine`
 - `TestStripLine_DoesNotMatchTrailingWhitespaceVariant`
-- `TestClean_CustomPattern`
-- `TestClean_MaxCommits_LimitsTraversal`
-- `TestClean_MergeCommitParentsAreRewritten`
-- `TestRun_RemovesBackupByDefault`
-- `TestRun_RestoresHeadWhenCleanerFails`
-- `TestRun_GCAfterRunFlagRunsGC`
-- `TestRun_ReportsTemporaryBackupReference`
-- `TestCreateBackupRef_AvoidsNameCollisions`
+- `TestRewrite_MaxCommits_LimitsTraversal`
+- `TestRewrite_MergeCommitParentsAreRewritten`
+- `TestMessageClean_RemovesBackupByDefault`
+- `TestMessageClean_RestoresHeadWhenRewriteFails`
+- `TestMessageClean_GCAfterRunFlagRunsGC`
+- `TestMessageClean_ReportsTemporaryBackupReference`
+- `TestBackupClean_RemovesOnlyP3CBackupRefs`
+- `TestIdentityRewrite_RewritesBothAuthorAndCommitter`
+- `TestRewrite_RewritesExactMatchIdentity`
 
 ## When To Update Tests
 
